@@ -12,12 +12,6 @@ class Engine(MinimalEngine):
     pass
 
 
-class MainEngine(Engine):
-    def search(self, board: chess.Board, time_limit: chess.engine.Limit, ponder: bool, draw_offered: bool,
-               root_moves: engine_wrapper.MOVE) -> chess.engine.PlayResult:
-        pass
-
-
 def board_to_input(board: chess.Board) -> torch.Tensor:
     ret = torch.zeros((1, 385), dtype=torch.float32, device='cuda')
     ret[0][0] = 1 if board.turn else 0
@@ -62,7 +56,16 @@ def pick_move(out: torch.Tensor, board: chess.Board) -> chess.Move:
     # output NN is 64 + 64 for starting move location to ending move location
     # iterate through legal moves and check what they are rated by NN
     # pick highest rated legal move
-
+    legal_moves: list[chess.Move] = list(board.legal_moves)
+    ranking: dict[list[chess.Move]: int] = dict()
+    for possible_move in legal_moves:
+        starting_ind = possible_move.from_square
+        ending_ind = possible_move.to_square
+        engine_rating = out[0][(starting_ind * 64) + ending_ind - 63]
+        ranking[possible_move] = engine_rating
+    top_move = max(ranking, key=ranking.get)
+    #print(chess.SQUARE_NAMES)
+    return top_move
 
 
 class NeuralNet(nn.Module):
@@ -72,7 +75,7 @@ class NeuralNet(nn.Module):
         self.l1 = nn.Linear(input_size, 200)
         self.layers = nn.ModuleList()
         self.layers.extend([nn.Linear(200, 200) for i in range(4)])
-        self.lo = nn.Linear(200, 128)
+        self.lo = nn.Linear(200, 4096)
 
     def forward(self, x):
         out = self.l1(x)
@@ -84,16 +87,12 @@ class NeuralNet(nn.Module):
 
 def move_decision(exploration_rate, board, model):
     if np.random.rand() < exploration_rate:
-        return PlayResult(random.choice(list(board.legal_moves)), None)
+        return random.choice(list(board.legal_moves))
     else:
         inp = board_to_input(board)
         move = model(inp)
-        for mv in board.legal_moves:
-            print(mv, type(mv))
-            print(mv.uci())
-        #m = chess.Move()
         move_choice = pick_move(move, board)
-        #return move_choice
+        return move_choice
 
 
 if __name__ == "__main__":
@@ -102,9 +101,9 @@ if __name__ == "__main__":
     input_size = 385
     device = torch.device("cuda")
     output_size = 80
-    lr = 0.001
+    lr = 0.0001
     games = 1
-    exploration_rate = 0
+    exploration_rate = 1
     exploration_rate_decay = 0.99999975
     model1 = NeuralNet()
     model2 = NeuralNet()
@@ -116,14 +115,23 @@ if __name__ == "__main__":
         board.reset_board()
         models = [model1, model2]
         counter = 0
-        while not board.is_game_over(claim_draw=True):
+        while not board.is_game_over(claim_draw=False):
             current_model = models[counter % 2]
-            #inp = board_to_input(board)
-            #print(inp)
-            #output = current_model(inp)
             move = move_decision(exploration_rate, board, model1)
-            print(move)
+            exploration_rate *= exploration_rate_decay
+            move = move.uci()
             res = board.push_uci(move)
             counter += 1
-            print(move)
         print(board.outcome())
+        #print(board.is_game_over())
+        print(board.fen())
+
+
+class MainEngine(Engine):
+    def __init__(self):
+        self.network = NeuralNet()
+
+    def search(self, board: chess.Board, time_limit: chess.engine.Limit, ponder: bool, draw_offered: bool,
+               root_moves: engine_wrapper.MOVE) -> chess.engine.PlayResult:
+        move = move_decision(0, board, self.network)
+        return PlayResult(move, None)
